@@ -28,12 +28,17 @@ month_range = st.sidebar.select_slider(
     options=months_sorted,
     value=(months_sorted[0], months_sorted[-1]),
 )
-centers = st.sidebar.multiselect(
-    "Centros", options=sorted(df["center"].unique()), default=sorted(df["center"].unique())
+all_centers = sorted(df["center"].unique())
+center_choice = st.sidebar.selectbox(
+    "Centro", options=["Todos"] + all_centers
 )
-plans = st.sidebar.multiselect(
-    "Planes", options=sorted(df["plan"].unique()), default=sorted(df["plan"].unique())
+centers = all_centers if center_choice == "Todos" else [center_choice]
+
+all_plans = sorted(df["plan"].unique())
+plan_choice = st.sidebar.selectbox(
+    "Plan", options=["Todos"] + all_plans
 )
+plans = all_plans if plan_choice == "Todos" else [plan_choice]
 
 mask = (
     (df["month"] >= month_range[0])
@@ -132,86 +137,67 @@ fig3.update_layout(xaxis_title="Mes", yaxis_title="Margen ($)", height=380,
                    hovermode="x unified")
 st.plotly_chart(fig3, use_container_width=True)
 
-# ── 4. Precio FitLife vs Competidor + campañas ──────────────────────────────
-st.subheader("🏪 Precio medio FitLife vs Competidor low-cost")
+# ── 4. LTV mensual (por plan) ────────────────────────────────────────────────
+st.subheader("💰 LTV mensual por plan")
+st.caption("LTV = margen mensual medio por socio × tenure medio (meses)")
 
-avg_price = fdf.groupby("month")["price_paid"].mean().reset_index(name="fitlife_price")
-price_comp = avg_price.merge(
-    fctx[["month", "competitor_lowcost_price", "campaign_active", "service_incident"]],
-    on="month", how="left",
+ltv_monthly = (
+    fdf.groupby(["month", "plan"])
+    .agg(avg_margin=("margin", "mean"), avg_tenure=("tenure_months", "mean"))
+    .reset_index()
 )
+ltv_monthly["ltv"] = ltv_monthly["avg_margin"] * ltv_monthly["avg_tenure"]
 
-fig4 = go.Figure()
-fig4.add_trace(go.Scatter(
-    x=price_comp["month"], y=price_comp["fitlife_price"],
-    name="FitLife (precio medio)", mode="lines+markers",
-    line=dict(color="#4C9BE8", width=2.5)
-))
-fig4.add_trace(go.Scatter(
-    x=price_comp["month"], y=price_comp["competitor_lowcost_price"],
-    name="Competidor low-cost", mode="lines+markers",
-    line=dict(color="#E84C4C", width=2.5, dash="dash")
-))
-
-# Marcar campañas como shapes + annotations (add_vline no acepta strings en eje x categórico)
-months_list = price_comp["month"].tolist()
-for _, row in price_comp.dropna(subset=["campaign_active"]).iterrows():
-    if pd.notna(row["campaign_active"]) and row["campaign_active"] != "":
-        idx = months_list.index(row["month"])
-        fig4.add_shape(
-            type="line", xref="x", yref="paper",
-            x0=idx, x1=idx, y0=0, y1=1,
-            line=dict(color="green", width=1, dash="dot"),
-        )
-        fig4.add_annotation(
-            x=idx, yref="paper", y=1.05,
-            text=str(row["campaign_active"]),
-            showarrow=False, font=dict(size=8, color="green"),
-            xanchor="left",
-        )
-
-fig4.update_layout(xaxis_title="Mes", yaxis_title="Precio ($)", height=400,
-                   legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                   hovermode="x unified")
+fig4 = px.line(
+    ltv_monthly, x="month", y="ltv", color="plan",
+    markers=True,
+    color_discrete_map={"basic": "#4C9BE8", "premium": "#B44CE8", "family": "#4CE87A"},
+    labels={"ltv": "LTV ($)", "month": "Mes"},
+)
+fig4.update_layout(height=380, hovermode="x unified",
+                   legend=dict(orientation="h", yanchor="bottom", y=1.02))
 st.plotly_chart(fig4, use_container_width=True)
 
-# ── 5. Distribución de margen por canal de adquisición ──────────────────────
-st.subheader("📣 Margen mensual por canal de adquisición")
+# ── 5. CAC mensual vs LTV medio ──────────────────────────────────────────────
+st.subheader("📊 Evolución mensual: CAC vs LTV medio")
+st.caption("Ratio LTV/CAC > 3 indica rentabilidad sostenible")
 
-channel_monthly = (
-    fdf.groupby(["month", "acquisition_channel"])["margin"].sum().reset_index()
+ltv_total = (
+    fdf.groupby("month")
+    .apply(lambda g: (g["margin"] * g["tenure_months"]).mean(), include_groups=False)
+    .reset_index(name="ltv_avg")
 )
-fig5 = px.bar(
-    channel_monthly, x="month", y="margin", color="acquisition_channel",
-    barmode="stack",
-    color_discrete_sequence=px.colors.qualitative.Set2,
-)
-fig5.update_layout(xaxis_title="Mes", yaxis_title="Margen ($)", height=380,
-                   legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                   hovermode="x unified")
-st.plotly_chart(fig5, use_container_width=True)
+cac_monthly = fctx[["month", "acquisition_cost_avg"]].copy()
+ltv_cac = ltv_total.merge(cac_monthly, on="month", how="left")
+ltv_cac["ltv_cac_ratio"] = ltv_cac["ltv_avg"] / ltv_cac["acquisition_cost_avg"]
 
-# ── 6. Ocupación media y coste de adquisición ────────────────────────────────
-st.subheader("🏋️ Ocupación media & Coste de adquisición mensual")
-
-fig6 = make_subplots(specs=[[{"secondary_y": True}]])
-fig6.add_trace(
-    go.Scatter(x=fctx["month"], y=fctx["avg_occupancy_rate"] * 100,
-               name="Ocupación (%)", mode="lines+markers",
-               line=dict(color="#4CE8C8", width=2.5)),
+fig5 = make_subplots(specs=[[{"secondary_y": True}]])
+fig5.add_trace(
+    go.Bar(x=ltv_cac["month"], y=ltv_cac["ltv_avg"],
+           name="LTV medio ($)", marker_color="#4CE87A", opacity=0.8),
     secondary_y=False,
 )
-fig6.add_trace(
-    go.Scatter(x=fctx["month"], y=fctx["acquisition_cost_avg"],
-               name="Coste adquisición ($)", mode="lines+markers",
-               line=dict(color="#E8B44C", width=2.5)),
+fig5.add_trace(
+    go.Scatter(x=ltv_cac["month"], y=ltv_cac["acquisition_cost_avg"],
+               name="CAC ($)", mode="lines+markers",
+               line=dict(color="#E8714C", width=2.5)),
+    secondary_y=False,
+)
+fig5.add_trace(
+    go.Scatter(x=ltv_cac["month"], y=ltv_cac["ltv_cac_ratio"],
+               name="Ratio LTV/CAC", mode="lines+markers",
+               line=dict(color="#B44CE8", width=2, dash="dot")),
     secondary_y=True,
 )
-fig6.update_yaxes(title_text="Ocupación (%)", secondary_y=False)
-fig6.update_yaxes(title_text="Coste adquisición ($)", secondary_y=True)
-fig6.update_layout(hovermode="x unified", height=380,
+# Línea de referencia ratio = 3
+fig5.add_hline(y=3, line_dash="dash", line_color="gray",
+               annotation_text="Ratio 3x (objetivo)", annotation_position="bottom right",
+               secondary_y=True)
+fig5.update_yaxes(title_text="USD ($)", secondary_y=False)
+fig5.update_yaxes(title_text="Ratio LTV/CAC", secondary_y=True)
+fig5.update_layout(hovermode="x unified", height=420,
                    legend=dict(orientation="h", yanchor="bottom", y=1.02))
-st.plotly_chart(fig6, use_container_width=True)
+st.plotly_chart(fig5, use_container_width=True)
 
 # ── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("---")
